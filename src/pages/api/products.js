@@ -1,30 +1,59 @@
 // pages/api/products.js
 import { db } from '../../lib/firebaseConfig';
-import { collection, query, orderBy, limit, startAfter, getDocs } from 'firebase/firestore';
+import { collection, query, orderBy, limit, startAfter, getDocs, where } from 'firebase/firestore';
+import Fuse from 'fuse.js'; // Import Fuse.js
 
 export default async function handler(req, res) {
   try {
-    const { page = 1, limit = 10, lastVisibleId = null } = req.query; // Page number, page size, and the last document ID
+    const {
+      page = 1,
+      limit = 10,
+      lastVisibleId,
+      search = '',
+      category,
+      sort = 'asc',
+    } = req.query; // Extract parameters
 
     const productCollection = collection(db, 'products');
-    let q;
 
-    if (lastVisibleId) {
-      // If lastVisibleId is provided, fetch products starting after the last document
-      const lastDocSnapshot = await getDocs(query(productCollection, orderBy('name'), limit(1), startAfter(lastVisibleId)));
-      q = query(productCollection, orderBy('name'), startAfter(lastDocSnapshot), limit(parseInt(limit)));
-    } else {
-      // Initial query without any cursor
-      q = query(productCollection, orderBy('name'), limit(parseInt(limit)));
+    // Create a base query
+    let productQuery = query(productCollection);
+
+    // Add filtering by category if provided
+    if (category) {
+      productQuery = query(productQuery, where('category', '==', category));
     }
 
-    const querySnapshot = await getDocs(q);
-    const products = [];
-    querySnapshot.forEach((doc) => {
-      products.push({ id: doc.id, ...doc.data() });
-    });
+    // Determine the order direction for price sorting
+    const orderDirection = sort === 'desc' ? 'desc' : 'asc'; // Default to ascending
+    productQuery = query(productQuery, orderBy('price', orderDirection));
 
-    // Get the last document in the snapshot for pagination
+    // Pagination handling
+    if (lastVisibleId) {
+      const lastDocSnapshot = await getDocs(query(productCollection, orderBy('price', orderDirection), limit(1), startAfter(lastVisibleId)));
+      if (lastDocSnapshot.empty) {
+        return res.status(400).json({ error: 'Invalid lastVisibleId' });
+      }
+      productQuery = query(productQuery, startAfter(lastDocSnapshot.docs[0]), limit(parseInt(limit)));
+    } else {
+      productQuery = query(productQuery, limit(parseInt(limit)));
+    }
+
+    const querySnapshot = await getDocs(productQuery);
+    let products = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // If a search term is provided, filter products using Fuse.js
+    if (search) {
+      const fuse = new Fuse(products, {
+        keys: ['title'], // Specify the fields to search in
+        threshold: 0.3, // Define the threshold for fuzzy matching
+      });
+
+      const result = fuse.search(search); // Perform the search
+      products = result.map(({ item }) => item); // Extract the filtered products
+    }
+
+    // Handle pagination for filtered results
     const lastVisible = querySnapshot.docs[querySnapshot.docs.length - 1];
 
     res.status(200).json({
